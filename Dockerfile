@@ -6,9 +6,8 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install build dependencies for native modules and dependencies
-# libc6-compat helps with compatibility for OpenSSL/Network libs on Alpine
-RUN apk add --no-cache libc6-compat
+# Install build dependencies for native modules (better-sqlite3 etc.)
+RUN apk add --no-cache python3 make g++ libc6-compat
 RUN npm ci --only=production
 
 # Production stage
