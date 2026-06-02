@@ -4,5 +4,6 @@ node_modules/
 *.log
 auth_info/
 sessions/
+store/
 public/media/
 n8n-nodes-chatery-whatsapp/

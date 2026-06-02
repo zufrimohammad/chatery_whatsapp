@@ -7,6 +7,7 @@ const qrcode = require('qrcode');
 const BaileysStore = require('./BaileysStore');
 const MessageFormatter = require('./MessageFormatter');
 const wsManager = require('../websocket/WebSocketManager');
+const dbManager = require('../database/Database');
 
 /**
  * WhatsApp Session Class
@@ -19,8 +20,6 @@ class WhatsAppSession {
         this.qrCode = null;
         this.connectionStatus = 'disconnected';
         this.authFolder = path.join(process.cwd(), 'sessions', sessionId);
-        this.storeFile = path.join(this.authFolder, 'store.json');
-        this.configFile = path.join(this.authFolder, 'config.json');
         this.mediaFolder = path.join(process.cwd(), 'public', 'media', sessionId);
         this.phoneNumber = null;
         this.name = null;
@@ -31,7 +30,7 @@ class WhatsAppSession {
         this.metadata = options.metadata || {};
         this.webhooks = options.webhooks || []; // Array of { url, events? }
         
-        // Load config if exists
+        // Load config from SQLite
         this._loadConfig();
     }
     
@@ -40,10 +39,12 @@ class WhatsAppSession {
      */
     _loadConfig() {
         try {
-            if (fs.existsSync(this.configFile)) {
-                const config = JSON.parse(fs.readFileSync(this.configFile, 'utf8'));
-                this.metadata = config.metadata || this.metadata;
-                this.webhooks = config.webhooks || this.webhooks;
+            const row = dbManager.prepare(
+                'SELECT metadata, webhooks FROM session_configs WHERE session_id = ?'
+            ).get(this.sessionId);
+            if (row) {
+                this.metadata = JSON.parse(row.metadata || '{}');
+                this.webhooks = JSON.parse(row.webhooks || '[]');
             }
         } catch (e) {
             console.log(`⚠️ [${this.sessionId}] Could not load config:`, e.message);
@@ -51,17 +52,18 @@ class WhatsAppSession {
     }
     
     /**
-     * Save session config to file
+     * Save session config to SQLite database
      */
     _saveConfig() {
         try {
-            if (!fs.existsSync(this.authFolder)) {
-                fs.mkdirSync(this.authFolder, { recursive: true });
-            }
-            fs.writeFileSync(this.configFile, JSON.stringify({
-                metadata: this.metadata,
-                webhooks: this.webhooks
-            }, null, 2));
+            dbManager.prepare(
+                `INSERT OR REPLACE INTO session_configs (session_id, metadata, webhooks, updated_at) 
+                 VALUES (?, ?, ?, strftime('%s','now'))`
+            ).run(
+                this.sessionId,
+                JSON.stringify(this.metadata),
+                JSON.stringify(this.webhooks)
+            );
         } catch (e) {
             console.log(`⚠️ [${this.sessionId}] Could not save config:`, e.message);
         }
@@ -160,25 +162,14 @@ class WhatsAppSession {
                 fs.mkdirSync(this.authFolder, { recursive: true });
             }
 
-            // Initialize custom in-memory store with sessionId
+            // Initialize SQLite-backed store with sessionId
             this.store = new BaileysStore(this.sessionId);
 
-            // Load existing store data if available
-            if (fs.existsSync(this.storeFile)) {
-                try {
-                    this.store.readFromFile(this.storeFile);
-                    console.log(`📂 [${this.sessionId}] Store data loaded from file`);
-                } catch (e) {
-                    console.log(`⚠️ [${this.sessionId}] Could not load store file:`, e.message);
-                }
-            }
-
-            // Save store periodically (every 30 seconds) and cleanup old media
+            // Periodic media cleanup (every 30 seconds)
+            // Data persistence is handled automatically by SQLite
             this.storeInterval = setInterval(() => {
                 try {
-                    // Cleanup old media files before saving (keep only last 100 per chat)
                     this.store.cleanupOldMedia(100);
-                    this.store.writeToFile(this.storeFile);
                 } catch (e) {
                     // Silent fail
                 }
@@ -195,7 +186,7 @@ class WhatsAppSession {
                 syncFullHistory: true
             });
 
-            // Bind store to socket events
+            // Bind store to socket events (data auto-persisted to SQLite)
             this.store.bind(this.socket.ev);
 
             // Setup event listeners
@@ -479,9 +470,16 @@ class WhatsAppSession {
                 clearInterval(this.storeInterval);
             }
             
-            // Clear store and delete all media files
+            // Clear store data from SQLite and delete all media files
             if (this.store) {
                 this.store.clear();
+            }
+            
+            // Delete session config from SQLite
+            try {
+                dbManager.prepare('DELETE FROM session_configs WHERE session_id = ?').run(this.sessionId);
+            } catch (e) {
+                // Silent fail
             }
             
             // Delete media folder for this session
@@ -1621,7 +1619,15 @@ class WhatsAppSession {
             }
 
             // Generate filename
-            const mimetype = mediaContent.mimetype || this._getMimetype(contentType);
+            // Fallback mimetype map for when mediaContent.mimetype is missing
+            const defaultMimetypes = {
+                'imageMessage': 'image/jpeg',
+                'audioMessage': 'audio/ogg',
+                'documentMessage': 'application/octet-stream',
+                'stickerMessage': 'image/webp',
+                'videoMessage': 'video/mp4'
+            };
+            const mimetype = mediaContent.mimetype || defaultMimetypes[contentType] || 'application/octet-stream';
             const ext = this._getExtFromMimetype(mimetype);
             const filename = mediaContent.fileName || `${message.key.id}.${ext}`;
             const filePath = path.join(mediaDir, filename);
@@ -1641,13 +1647,11 @@ class WhatsAppSession {
 
             // Update message in store with media path
             if (this.store) {
-                const chatMessages = this.store.messages.get(message.key.remoteJid);
-                if (chatMessages && chatMessages.has(message.key.id)) {
-                    const msg = chatMessages.get(message.key.id);
-                    if (msg) {
-                        msg._mediaPath = relativePath;
-                        msg._mediaLocalPath = filePath;
-                    }
+                const msg = this.store.getMessage(message.key.remoteJid, message.key.id);
+                if (msg) {
+                    msg._mediaPath = relativePath;
+                    msg._mediaLocalPath = filePath;
+                    this.store.updateMessage(message.key.remoteJid, message.key.id, msg);
                 }
             }
 
@@ -1665,6 +1669,7 @@ class WhatsAppSession {
             'audio/ogg': 'ogg', 'audio/ogg; codecs=opus': 'ogg', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a',
             'application/pdf': 'pdf'
         };
+        if (!mimetype || typeof mimetype !== 'string') return 'bin';
         return map[mimetype] || mimetype.split('/')[1]?.split(';')[0] || 'bin';
     }
 

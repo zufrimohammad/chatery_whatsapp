@@ -28,7 +28,7 @@ class WhatsAppManager {
                 const sessionPath = path.join(this.sessionsFolder, sessionId);
                 if (fs.statSync(sessionPath).isDirectory()) {
                     console.log(`🔄 Restoring session: ${sessionId}`);
-                    // Session will load its own config from file
+                    // Session will load its own config from SQLite database
                     const session = new WhatsAppSession(sessionId, {});
                     this.sessions.set(sessionId, session);
                     await session.connect();
