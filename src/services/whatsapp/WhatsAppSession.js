@@ -1,8 +1,13 @@
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage, getContentType } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const path = require('path');
 const fs = require('fs');
 const qrcode = require('qrcode');
+
+let _baileys;
+async function _getBaileys() {
+    if (!_baileys) _baileys = await import('@whiskeysockets/baileys');
+    return _baileys;
+}
 
 const BaileysStore = require('./BaileysStore');
 const MessageFormatter = require('./MessageFormatter');
@@ -175,6 +180,7 @@ class WhatsAppSession {
                 }
             }, 30_000);
 
+            const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = await _getBaileys();
             const { state, saveCreds } = await useMultiFileAuthState(this.authFolder);
             const { version } = await fetchLatestBaileysVersion();
 
@@ -190,7 +196,7 @@ class WhatsAppSession {
             this.store.bind(this.socket.ev);
 
             // Setup event listeners
-            this._setupEventListeners(saveCreds);
+            this._setupEventListeners(saveCreds, DisconnectReason);
 
             return { success: true, message: 'Initializing connection...' };
         } catch (error) {
@@ -200,7 +206,7 @@ class WhatsAppSession {
         }
     }
 
-    _setupEventListeners(saveCreds) {
+    _setupEventListeners(saveCreds, DisconnectReason) {
         // Connection update
         this.socket.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, qr } = update;
@@ -1594,6 +1600,7 @@ class WhatsAppSession {
         try {
             if (!message.message) return null;
 
+            const { getContentType, downloadMediaMessage } = await _getBaileys();
             const contentType = getContentType(message.message);
             const mediaTypes = ['imageMessage', 'audioMessage', 'documentMessage', 'stickerMessage']; // 'videoMessage' can be added if needed
             
